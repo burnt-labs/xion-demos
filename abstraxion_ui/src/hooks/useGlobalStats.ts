@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useAbstraxionClient } from "@burnt-labs/abstraxion";
 
-const USER_CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "";
 const CHESS_CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_CHESS_GAME_ADDRESS || "";
 
 interface GlobalStats {
