@@ -1,32 +1,48 @@
 "use client";
 import React from "react";
-import { Inter } from 'next/font/google'
-import './globals.css'
-import {AbstraxionProvider} from "@burnt-labs/abstraxion";
+import { Inter, JetBrains_Mono } from "next/font/google";
+import "./globals.css";
+import {
+  AbstraxionProvider,
+  type AbstraxionConfig,
+} from "@burnt-labs/abstraxion";
+import { ThemeProvider } from "@/components/ThemeProvider";
+import { CHAIN_ID, RPC_URL, REST_URL, TREASURY_ADDRESS, CHESS_CONTRACT_ADDRESS } from "@/config";
 
-import "@burnt-labs/ui/dist/index.css";
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+});
 
-const inter = Inter({ subsets: ['latin'] })
+const mono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-mono",
+});
 
-const treasuryConfig = {
-  treasury: process.env.NEXT_PUBLIC_TREASURY_ADDRESS,
-  rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://rpc.xion-testnet-2.burnt.com:443",
-  restUrl: process.env.NEXT_PUBLIC_REST_URL || "https://api.xion-testnet-2.burnt.com",
+const abstraxionConfig: AbstraxionConfig = {
+  chainId: CHAIN_ID,
+  treasury: TREASURY_ADDRESS,
+  rpcUrl: RPC_URL,
+  restUrl: REST_URL,
+  contracts: [CHESS_CONTRACT_ADDRESS],
+  authentication: {
+    type: "auto" as const,
+    authAppUrl: "http://localhost:3000",
+  },
 };
 
 export default function RootLayout({
   children,
 }: {
-  children: React.ReactNode
+  children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className={inter.className}>
-        <AbstraxionProvider
-          config={treasuryConfig}>
-          {children}
+    <html lang="en" className={`${inter.variable} ${mono.variable}`}>
+      <body className="font-sans">
+        <AbstraxionProvider config={abstraxionConfig}>
+          <ThemeProvider>{children}</ThemeProvider>
         </AbstraxionProvider>
       </body>
     </html>
-  )
+  );
 }

@@ -1,14 +1,14 @@
 import { useState, useCallback, useEffect } from "react";
 import { ExecuteResult } from "@cosmjs/cosmwasm-stargate";
+import type { EncodeObject } from "@cosmjs/proto-signing";
 import {
   useAbstraxionAccount,
   useAbstraxionSigningClient,
   useAbstraxionClient,
 } from "@burnt-labs/abstraxion";
+import type { GranteeSignerClient } from "@burnt-labs/abstraxion";
 import type { ChessGame, ChessMove, TimeStatus } from "../types/chess";
-// Browser-compatible hash function
-
-const CHESS_CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_CHESS_GAME_ADDRESS || "";
+import { CHESS_CONTRACT_ADDRESS } from "@/config";
 
 interface UseChessGameReturn {
   currentGame: ChessGame | null;
@@ -17,7 +17,7 @@ interface UseChessGameReturn {
   error: string | null;
   moveError: string | null;
   timeStatus: TimeStatus | null;
-  createGame: (opponentAddress: string) => Promise<{ game: ChessGame; gameId: string } | null>;
+  createGame: (opponentAddress: string | null, options?: { wagerAmount?: string; allowSpectatorWagers?: boolean; inviteCode?: string; timeControl?: string }) => Promise<{ game: ChessGame; gameId: string } | null>;
   fetchGame: (gameId: string) => Promise<ChessGame | null>;
   makeMove: (gameId: string, move: ChessMove) => Promise<boolean>;
   claimVictory: (gameId: string) => Promise<ExecuteResult | null>;
@@ -38,8 +38,29 @@ interface UseChessGameReturn {
 
 export function useChessGame(): UseChessGameReturn {
   const { data: account } = useAbstraxionAccount();
-  const { client } = useAbstraxionSigningClient();
+  const { client: signingClient } = useAbstraxionSigningClient();
+  // GranteeSignerClient extends SigningCosmWasmClient and provides .execute()
+  const client = signingClient as GranteeSignerClient | undefined;
+  // requireAuth: true → PopupSigningClient; used for game creation (user pays / authorizes directly)
+  const { client: requireAuthClient } = useAbstraxionSigningClient({ requireAuth: true });
   const { client: queryClient } = useAbstraxionClient();
+
+  // Helper: build a CosmWasm execute EncodeObject for use with signAndBroadcast.
+  // msg is passed as a plain JS object — the dashboard's normalizeMessage converts it
+  // to UTF-8 bytes before signing. Pre-encoding as Uint8Array breaks JSON serialization
+  // through the popup postMessage channel.
+  const buildExecuteMsg = useCallback((
+    contractMsg: object,
+    funds: { denom: string; amount: string }[] = [],
+  ): EncodeObject => ({
+    typeUrl: "/cosmwasm.wasm.v1.MsgExecuteContract",
+    value: {
+      sender: account?.bech32Address ?? "",
+      contract: CHESS_CONTRACT_ADDRESS,
+      msg: contractMsg,
+      funds,
+    },
+  }), [account?.bech32Address]);
   
   const [currentGame, setCurrentGame] = useState<ChessGame | null>(null);
   const [userActiveGames, setUserActiveGames] = useState<{ id: string; game: ChessGame }[]>([]);
@@ -91,14 +112,14 @@ export function useChessGame(): UseChessGameReturn {
     }
   }, [queryClient]);
 
-  const createGame = useCallback(async (opponentAddress: string): Promise<{ game: ChessGame; gameId: string } | null> => {
-    if (!client || !account) {
-      setError("Client or account not available");
+  const createGame = useCallback(async (opponentAddress: string | null, options?: { wagerAmount?: string; allowSpectatorWagers?: boolean; inviteCode?: string; timeControl?: string }): Promise<{ game: ChessGame; gameId: string } | null> => {
+    if (!requireAuthClient || !account) {
+      setError("Auth client or account not available");
       return null;
     }
 
-    if (!opponentAddress || opponentAddress === account.bech32Address) {
-      setError("Invalid opponent address");
+    if (opponentAddress && opponentAddress === account.bech32Address) {
+      setError("Cannot play against yourself");
       return null;
     }
 
@@ -106,50 +127,55 @@ export function useChessGame(): UseChessGameReturn {
     setError(null);
 
     try {
-      // Debug: Log contract address being used
-      console.log("Creating game with chess contract:", CHESS_CONTRACT_ADDRESS);
-
-      // Get current block height for game ID generation
       const currentHeight = await queryClient?.getHeight();
       const blockHeight = currentHeight || Date.now();
-      
-      // Determine colors (creator is white by default)
+
       const white = account.bech32Address;
-      const black = opponentAddress;
-      
-      const gameId = await generateGameId(white, black, blockHeight);
+      const timeControl = options?.timeControl ?? "1d";
+      const gameId = await generateGameId(white, opponentAddress ?? "open", blockHeight);
 
       const newGame: ChessGame = {
         id: gameId,
         white,
-        black,
+        black: opponentAddress,
         moves: "",
-        current_fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", // Starting position
-        status: 'active',
+        current_fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        status: opponentAddress ? 'active' : 'waiting',
         current_turn: 'white',
         last_move_block: blockHeight,
-        white_time_remaining: 172800, // ~2 days in blocks
-        black_time_remaining: 172800, // ~2 days in blocks
+        white_time_remaining: 172800,
+        black_time_remaining: 172800,
         created_block: blockHeight,
         claim_block: null,
-        time_control: "1d",
+        time_control: timeControl,
         move_count: 0,
-        draw_proposed_by: null
+        draw_proposed_by: null,
+        wager_amount: options?.wagerAmount ?? null,
+        wager_denom: "uxion",
+        wager_funded_white: false,
+        wager_funded_black: false,
+        spectator_wagers_enabled: options?.allowSpectatorWagers ?? false,
+        invite_code: options?.inviteCode ?? null,
       };
 
-      const msg = { 
-        create_game: { 
+      const contractMsg = {
+        create_game: {
           game_id: gameId,
-          opponent: opponentAddress,
-          time_control: "1d"
-        } 
+          opponent: opponentAddress ?? null,
+          time_control: timeControl,
+          wager_amount: options?.wagerAmount ?? null,
+          allow_spectator_wagers: options?.allowSpectatorWagers ?? null,
+          invite_code: options?.inviteCode ?? null,
+        }
       };
-      
-      console.log("Creating game with ID:", gameId);
-      const result = await client.execute(
+
+      const funds = options?.wagerAmount
+        ? [{ denom: "uxion", amount: options.wagerAmount }]
+        : [];
+
+      const result = await requireAuthClient.signAndBroadcast(
         account.bech32Address,
-        CHESS_CONTRACT_ADDRESS,
-        msg,
+        [buildExecuteMsg(contractMsg, funds)],
         "auto"
       );
 
@@ -171,7 +197,7 @@ export function useChessGame(): UseChessGameReturn {
     } finally {
       setLoading(false);
     }
-  }, [client, account, queryClient, generateGameId]);
+  }, [requireAuthClient, account, queryClient, generateGameId, buildExecuteMsg]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const makeMove = useCallback(async (gameId: string, move: ChessMove): Promise<boolean> => {
     if (!client || !account) {
@@ -272,17 +298,7 @@ export function useChessGame(): UseChessGameReturn {
         throw new Error("Game not found");
       }
 
-      const game = gameResponse.game as ChessGame;
-      const currentHeight = await queryClient.getHeight();
-      const blockHeight = currentHeight || Date.now();
-
-      const updatedGame: ChessGame = {
-        ...game,
-        status: 'checkmate_claimed',
-        claim_block: blockHeight
-      };
-
-      const msg = { update: { value: JSON.stringify(updatedGame) } };
+      const msg = { update_game_status: { game_id: gameId, status: "checkmate_claimed" } };
       const result = await client.execute(
         account.bech32Address,
         CHESS_CONTRACT_ADDRESS,
@@ -291,7 +307,8 @@ export function useChessGame(): UseChessGameReturn {
       );
 
       if (result.transactionHash) {
-        setCurrentGame(updatedGame);
+        const refreshedGame = await fetchGame(gameId);
+        if (refreshedGame) setCurrentGame(refreshedGame);
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
 
@@ -303,10 +320,10 @@ export function useChessGame(): UseChessGameReturn {
     } finally {
       setLoading(false);
     }
-  }, [client, account, queryClient]);
+  }, [client, account, queryClient, fetchGame]);
 
   const acceptDefeat = useCallback(async (gameId: string): Promise<ExecuteResult | null> => {
-    if (!client || !account || !queryClient) {
+    if (!client || !account) {
       setError("Client not available");
       return null;
     }
@@ -315,26 +332,7 @@ export function useChessGame(): UseChessGameReturn {
     setError(null);
 
     try {
-      const gameResponse = await queryClient.queryContractSmart(CHESS_CONTRACT_ADDRESS, {
-        get_game: { game_id: gameId }
-      });
-
-      if (!gameResponse || !gameResponse.game) {
-        throw new Error("Game not found");
-      }
-
-      const game = gameResponse.game as ChessGame;
-      
-      // Determine winner based on who accepted defeat
-      const isWhite = game.white === account.bech32Address;
-      const status = isWhite ? 'black_won' : 'white_won';
-
-      const updatedGame: ChessGame = {
-        ...game,
-        status
-      };
-
-      const msg = { update: { value: JSON.stringify(updatedGame) } };
+      const msg = { resign_game: { game_id: gameId } };
       const result = await client.execute(
         account.bech32Address,
         CHESS_CONTRACT_ADDRESS,
@@ -343,7 +341,8 @@ export function useChessGame(): UseChessGameReturn {
       );
 
       if (result.transactionHash) {
-        setCurrentGame(updatedGame);
+        const refreshedGame = await fetchGame(gameId);
+        if (refreshedGame) setCurrentGame(refreshedGame);
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
 
@@ -355,7 +354,7 @@ export function useChessGame(): UseChessGameReturn {
     } finally {
       setLoading(false);
     }
-  }, [client, account, queryClient]);
+  }, [client, account, fetchGame]);
 
   const disputeGame = useCallback(async (gameId: string): Promise<ExecuteResult | null> => {
     if (!client || !account || !queryClient) {
@@ -381,12 +380,7 @@ export function useChessGame(): UseChessGameReturn {
         throw new Error("Can only dispute checkmate claims");
       }
 
-      const updatedGame: ChessGame = {
-        ...game,
-        status: 'disputed'
-      };
-
-      const msg = { update: { value: JSON.stringify(updatedGame) } };
+      const msg = { update_game_status: { game_id: gameId, status: "disputed" } };
       const result = await client.execute(
         account.bech32Address,
         CHESS_CONTRACT_ADDRESS,
@@ -395,7 +389,8 @@ export function useChessGame(): UseChessGameReturn {
       );
 
       if (result.transactionHash) {
-        setCurrentGame(updatedGame);
+        const refreshedGame = await fetchGame(gameId);
+        if (refreshedGame) setCurrentGame(refreshedGame);
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
 
@@ -407,7 +402,7 @@ export function useChessGame(): UseChessGameReturn {
     } finally {
       setLoading(false);
     }
-  }, [client, account, queryClient]);
+  }, [client, account, queryClient, fetchGame]);
 
   const resignGame = useCallback(async (gameId: string): Promise<ExecuteResult | null> => {
     if (!client || !account) {
@@ -505,8 +500,8 @@ export function useChessGame(): UseChessGameReturn {
     if (!account?.bech32Address) return [];
     
     const allGames = await fetchAllGames();
-    return allGames.filter(({ game }) => 
-      game.status === 'active' && 
+    return allGames.filter(({ game }) =>
+      (game.status === 'active' || game.status === 'waiting') &&
       (game.white === account.bech32Address || game.black === account.bech32Address)
     );
   }, [fetchAllGames, account?.bech32Address]);

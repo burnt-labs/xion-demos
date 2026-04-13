@@ -1,6 +1,6 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
-use cosmwasm_std::Addr;
-use crate::state::{ChessGame, UserProfile};
+use cosmwasm_std::{Addr, Uint128};
+use crate::state::{ChessGame, UserProfile, SpectatorWager};
 
 #[cw_serde]
 pub struct InstantiateMsg {}
@@ -16,11 +16,20 @@ pub enum ExecuteMsg {
         fen: String,
         claimed_status: GameStatus,
     },
-    /// Create a new chess game
+    /// Create a new chess game (optionally with wager — send funds with msg)
+    /// If opponent is None, game is open in the lobby for anyone to join
     CreateGame {
         game_id: String,
-        opponent: Addr,
+        opponent: Option<Addr>,
         time_control: String,
+        wager_amount: Option<Uint128>,
+        allow_spectator_wagers: Option<bool>,
+        invite_code: Option<String>,
+    },
+    /// Join an open lobby game (becomes black) — send matching wager funds if required
+    JoinGame {
+        game_id: String,
+        invite_code: Option<String>,
     },
     /// Make a move in a chess game
     MakeMove {
@@ -47,6 +56,32 @@ pub enum ExecuteMsg {
         game_id: String,
         accept: bool,
     },
+    /// Place a spectator wager on a game
+    PlaceSpectatorWager {
+        game_id: String,
+        prediction: String, // "white", "black", "draw"
+    },
+    /// Claim winnings after a game ends (players and spectators)
+    ClaimWinnings {
+        game_id: String,
+    },
+    /// Cancel a waiting game and refund wager
+    CancelGame {
+        game_id: String,
+    },
+    /// Admin: set ELO for demo seeding
+    AdminSetElo {
+        address: Addr,
+        elo: u32,
+    },
+    /// Admin: set wins/draws/losses for demo seeding
+    AdminSetStats {
+        address: Addr,
+        wins: u32,
+        draws: u32,
+        losses: u32,
+        games_played: u32,
+    },
 }
 
 #[cw_serde]
@@ -55,10 +90,10 @@ pub enum QueryMsg {
     /// Verify if a FEN position is checkmate/stalemate/ongoing
     #[returns(VerificationResponse)]
     VerifyPosition { fen: String },
-    
+
     /// Check if a move is legal from current position
     #[returns(MoveValidationResponse)]
-    ValidateMove { 
+    ValidateMove {
         current_fen: String,
         move_from: String,
         move_to: String,
@@ -88,6 +123,14 @@ pub enum QueryMsg {
     /// Get all users
     #[returns(UsersResponse)]
     GetAllUsers {},
+
+    /// Get open lobby games (status = "waiting", no specific opponent or with invite code)
+    #[returns(OpenGamesResponse)]
+    GetOpenGames {},
+
+    /// Get spectator wagers for a game
+    #[returns(SpectatorWagersResponse)]
+    GetSpectatorWagers { game_id: String },
 }
 
 #[cw_serde]
@@ -145,4 +188,17 @@ pub struct UserProfileResponse {
 #[cw_serde]
 pub struct UsersResponse {
     pub users: Vec<Addr>,
+}
+
+#[cw_serde]
+pub struct OpenGamesResponse {
+    pub games: Vec<ChessGame>,
+}
+
+#[cw_serde]
+pub struct SpectatorWagersResponse {
+    pub wagers: Vec<SpectatorWager>,
+    pub total_white: Uint128,
+    pub total_black: Uint128,
+    pub total_draw: Uint128,
 }

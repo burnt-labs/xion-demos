@@ -4,10 +4,11 @@ import {
   useAbstraxionAccount,
   useAbstraxionSigningClient,
   useAbstraxionClient,
+  type GranteeSignerClient,
 } from "@burnt-labs/abstraxion";
 import type { ChessUser } from "../types/chess";
 
-const CHESS_CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_CHESS_GAME_ADDRESS || "";
+import { CHESS_CONTRACT_ADDRESS } from "@/config";
 
 interface UseUserProfileReturn {
   userProfile: ChessUser | null;
@@ -21,7 +22,8 @@ interface UseUserProfileReturn {
 
 export function useUserProfileUnified(): UseUserProfileReturn {
   const { data: account } = useAbstraxionAccount();
-  const { client } = useAbstraxionSigningClient();
+  const { client: _client } = useAbstraxionSigningClient();
+  const client = _client as GranteeSignerClient | undefined;
   const { client: queryClient } = useAbstraxionClient();
   
   const [userProfile, setUserProfile] = useState<ChessUser | null>(null);
@@ -32,6 +34,10 @@ export function useUserProfileUnified(): UseUserProfileReturn {
   const initializeUser = useCallback(async (username?: string): Promise<ExecuteResult | null> => {
     if (!client || !account) {
       setError("Client or account not available");
+      return null;
+    }
+    if (!CHESS_CONTRACT_ADDRESS) {
+      setError("Chess contract address not configured. Set NEXT_PUBLIC_CHESS_GAME_ADDRESS in .env.local");
       return null;
     }
 
@@ -90,6 +96,9 @@ export function useUserProfileUnified(): UseUserProfileReturn {
           losses: response.profile.losses,
           current_games: response.profile.current_games,
           created_at: response.profile.created_at.toString(),
+          verified: response.profile.verified ?? false,
+          verified_platform: response.profile.verified_platform ?? null,
+          verified_at: response.profile.verified_at ?? null,
         };
         setUserProfile(profile);
       } else {
@@ -132,6 +141,9 @@ export function useUserProfileUnified(): UseUserProfileReturn {
               losses: profileResponse.profile.losses,
               current_games: profileResponse.profile.current_games,
               created_at: profileResponse.profile.created_at.toString(),
+              verified: profileResponse.profile.verified ?? false,
+              verified_platform: profileResponse.profile.verified_platform ?? null,
+              verified_at: profileResponse.profile.verified_at ?? null,
             };
             users.push(user);
           }

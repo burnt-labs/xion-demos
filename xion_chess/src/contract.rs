@@ -1,13 +1,23 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
-use cosmwasm_std::{to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult};
+use cosmwasm_std::{
+    to_json_binary, BankMsg, Binary, Coin, Deps, DepsMut, Env, MessageInfo, Response, StdResult,
+    Uint128,
+};
 use cw2::set_contract_version;
 use shakmaty::{Chess, Position, Move, Role};
 use shakmaty::fen::Fen;
 
 use crate::error::ContractError;
-use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg, GameStatus, VerificationResponse, MoveValidationResponse, GameResponse, GamesResponse, GameIdsResponse, TimeStatusResponse, UserProfileResponse, UsersResponse};
-use crate::state::{ChessGame, UserProfile, GAMES, GAME_IDS, USER_PROFILES, USER_ADDRESSES};
+use crate::msg::{
+    ExecuteMsg, InstantiateMsg, QueryMsg, GameStatus, VerificationResponse, MoveValidationResponse,
+    GameResponse, GamesResponse, GameIdsResponse, TimeStatusResponse, UserProfileResponse,
+    UsersResponse, OpenGamesResponse, SpectatorWagersResponse,
+};
+use crate::state::{
+    ChessGame, UserProfile, SpectatorWager, GAMES, GAME_IDS, USER_PROFILES, USER_ADDRESSES,
+    SPECTATOR_WAGERS,
+};
 
 // version info for migration info
 const CONTRACT_NAME: &str = "crates.io:xion_chess";
@@ -41,8 +51,26 @@ pub fn execute(
         ExecuteMsg::VerifyPosition { fen, claimed_status } => {
             execute::verify_position(fen, claimed_status)
         }
-        ExecuteMsg::CreateGame { game_id, opponent, time_control } => {
-            execute::create_game(deps, env, info, game_id, opponent, time_control)
+        ExecuteMsg::CreateGame {
+            game_id,
+            opponent,
+            time_control,
+            wager_amount,
+            allow_spectator_wagers,
+            invite_code,
+        } => execute::create_game(
+            deps,
+            env,
+            info,
+            game_id,
+            opponent,
+            time_control,
+            wager_amount,
+            allow_spectator_wagers,
+            invite_code,
+        ),
+        ExecuteMsg::JoinGame { game_id, invite_code } => {
+            execute::join_game(deps, env, info, game_id, invite_code)
         }
         ExecuteMsg::MakeMove { game_id, from, to, promotion } => {
             execute::make_move(deps, env, info, game_id, from, to, promotion)
@@ -59,6 +87,25 @@ pub fn execute(
         ExecuteMsg::RespondToDrawRequest { game_id, accept } => {
             execute::respond_to_draw(deps, info, game_id, accept)
         }
+        ExecuteMsg::PlaceSpectatorWager { game_id, prediction } => {
+            execute::place_spectator_wager(deps, info, game_id, prediction)
+        }
+        ExecuteMsg::ClaimWinnings { game_id } => {
+            execute::claim_winnings(deps, info, game_id)
+        }
+        ExecuteMsg::CancelGame { game_id } => {
+            execute::cancel_game(deps, info, game_id)
+        }
+        ExecuteMsg::AdminSetElo { address, elo } => {
+            execute::admin_set_elo(deps, address, elo)
+        }
+        ExecuteMsg::AdminSetStats {
+            address,
+            wins,
+            draws,
+            losses,
+            games_played,
+        } => execute::admin_set_stats(deps, address, wins, draws, losses, games_played),
     }
 }
 
@@ -70,61 +117,56 @@ pub mod execute {
     /// k_factor is 32, scores: win=1000, draw=500, loss=0
     fn calculate_elo(winner_elo: u32, loser_elo: u32, is_draw: bool) -> (u32, u32) {
         let k_factor = 32u32;
-        let scale = 1000u32; // Scale factor for precision
-        
-        // Calculate rating difference (clamped to prevent overflow)
+        let scale = 1000u32;
+
         let rating_diff = if winner_elo >= loser_elo {
-            (winner_elo - loser_elo).min(800) // Cap at 800 to prevent overflow
+            (winner_elo - loser_elo).min(800)
         } else {
             (loser_elo - winner_elo).min(800)
         };
-        
-        // Simplified ELO expected score calculation using integer approximation
-        // For rating differences, use lookup table approach
+
         let expected_winner_scaled = match rating_diff {
-            0..=25 => 500,      // ~0.50
-            26..=50 => 537,     // ~0.537
-            51..=100 => 640,    // ~0.64
-            101..=150 => 691,   // ~0.691
-            151..=200 => 760,   // ~0.76
-            201..=300 => 849,   // ~0.849
-            301..=400 => 909,   // ~0.909
-            _ => 950,           // ~0.95 for large differences
+            0..=25 => 500,
+            26..=50 => 537,
+            51..=100 => 640,
+            101..=150 => 691,
+            151..=200 => 760,
+            201..=300 => 849,
+            301..=400 => 909,
+            _ => 950,
         };
-        
-        // If loser had higher rating, invert expectation
-        let (winner_expected, loser_expected) = if winner_elo >= loser_elo {
+
+        let (winner_expected, _loser_expected) = if winner_elo >= loser_elo {
             (expected_winner_scaled, scale - expected_winner_scaled)
         } else {
             (scale - expected_winner_scaled, expected_winner_scaled)
         };
-        
-        // Set actual scores
+
         let (winner_actual, loser_actual) = if is_draw {
-            (scale / 2, scale / 2) // Both get 0.5
+            (scale / 2, scale / 2)
         } else {
-            (scale, 0) // Winner gets 1.0, loser gets 0.0
+            (scale, 0)
         };
-        
-        // Calculate ELO changes: K * (actual - expected) / scale
-        // Use signed arithmetic for the differences
-        let winner_change = (k_factor as i32 * (winner_actual as i32 - winner_expected as i32)) / scale as i32;
-        let loser_change = (k_factor as i32 * (loser_actual as i32 - loser_expected as i32)) / scale as i32;
-        
-        // Apply changes (ensure no underflow below 100)
+
+        let winner_change =
+            (k_factor as i32 * (winner_actual as i32 - winner_expected as i32)) / scale as i32;
+        let loser_change =
+            (k_factor as i32 * (loser_actual as i32 - winner_expected as i32 * -1)) / scale as i32;
+        let _ = loser_change; // suppress unused warning — calculated symmetrically below
+
         let new_winner_elo = if winner_change >= 0 {
             winner_elo + winner_change as u32
         } else {
             winner_elo.saturating_sub((-winner_change) as u32)
         };
-        
-        let new_loser_elo = if loser_change >= 0 {
-            loser_elo + loser_change as u32
+
+        // Loser's change is the mirror of winner's
+        let new_loser_elo = if winner_change <= 0 {
+            loser_elo + (-winner_change) as u32
         } else {
-            loser_elo.saturating_sub((-loser_change) as u32)
+            loser_elo.saturating_sub(winner_change as u32)
         };
-        
-        // Ensure ratings don't go below 100 (minimum rating)
+
         (new_winner_elo.max(100), new_loser_elo.max(100))
     }
 
@@ -137,23 +179,24 @@ pub mod execute {
         is_draw: bool,
     ) -> Result<(), ContractError> {
         let white_addr = game.white.clone();
-        let black_addr = game.black.clone();
-        
-        // Load both profiles
+        let black_addr = match &game.black {
+            Some(addr) => addr.clone(),
+            None => return Ok(()),
+        };
+
         let mut white_profile = USER_PROFILES.load(deps.storage, white_addr.clone())?;
         let mut black_profile = USER_PROFILES.load(deps.storage, black_addr.clone())?;
-        
-        // Calculate new ELO ratings
+
         let (new_white_elo, new_black_elo) = if is_draw {
             calculate_elo(white_profile.elo, black_profile.elo, true)
         } else if white_won {
             calculate_elo(white_profile.elo, black_profile.elo, false)
         } else {
-            let (black_new, white_new) = calculate_elo(black_profile.elo, white_profile.elo, false);
+            let (black_new, white_new) =
+                calculate_elo(black_profile.elo, white_profile.elo, false);
             (white_new, black_new)
         };
-        
-        // Update white profile
+
         white_profile.elo = new_white_elo;
         white_profile.games_played += 1;
         if white_won {
@@ -164,8 +207,7 @@ pub mod execute {
             white_profile.draws += 1;
         }
         white_profile.current_games.retain(|id| id != &game.id);
-        
-        // Update black profile
+
         black_profile.elo = new_black_elo;
         black_profile.games_played += 1;
         if black_won {
@@ -176,11 +218,10 @@ pub mod execute {
             black_profile.draws += 1;
         }
         black_profile.current_games.retain(|id| id != &game.id);
-        
-        // Save updated profiles
+
         USER_PROFILES.save(deps.storage, white_addr, &white_profile)?;
         USER_PROFILES.save(deps.storage, black_addr, &black_profile)?;
-        
+
         Ok(())
     }
 
@@ -191,9 +232,9 @@ pub mod execute {
         username: String,
     ) -> Result<Response, ContractError> {
         let sender = info.sender.clone();
-        
-        // Load or create user profile
-        let mut profile = USER_PROFILES.may_load(deps.storage, sender.clone())?
+
+        let mut profile = USER_PROFILES
+            .may_load(deps.storage, sender.clone())?
             .unwrap_or_else(|| UserProfile {
                 username: username.clone(),
                 elo: 1200,
@@ -203,27 +244,30 @@ pub mod execute {
                 losses: 0,
                 current_games: Vec::new(),
                 created_at: env.block.height,
+                verified: false,
+                verified_platform: None,
+                verified_at: None,
             });
-        
-        // Update username if provided
+
         if !username.is_empty() {
             profile.username = username;
         }
-        
-        // Save profile
+
         USER_PROFILES.save(deps.storage, sender.clone(), &profile)?;
         USER_ADDRESSES.save(deps.storage, sender.clone(), &true)?;
-        
+
         Ok(Response::new()
             .add_attribute("action", "initialize_user")
             .add_attribute("user", sender)
             .add_attribute("username", profile.username))
     }
 
-    pub fn verify_position(fen: String, claimed_status: GameStatus) -> Result<Response, ContractError> {
+    pub fn verify_position(
+        fen: String,
+        claimed_status: GameStatus,
+    ) -> Result<Response, ContractError> {
         let verification = query::verify_position_internal(fen.clone())?;
-        
-        // Check if claimed status matches actual status
+
         let status_matches = match (&claimed_status, &verification.status) {
             (GameStatus::Checkmate, GameStatus::Checkmate) => true,
             (GameStatus::Stalemate, GameStatus::Stalemate) => true,
@@ -251,20 +295,48 @@ pub mod execute {
         env: Env,
         info: MessageInfo,
         game_id: String,
-        opponent: cosmwasm_std::Addr,
+        opponent: Option<cosmwasm_std::Addr>,
         time_control: String,
+        wager_amount: Option<Uint128>,
+        allow_spectator_wagers: Option<bool>,
+        invite_code: Option<String>,
     ) -> Result<Response, ContractError> {
-        // Check if game already exists
         if GAMES.has(deps.storage, game_id.clone()) {
             return Err(ContractError::GameAlreadyExists { id: game_id });
         }
 
-        // Ensure both players have profiles
         let white_addr = info.sender.clone();
-        let black_addr = opponent.clone();
-        
-        // Initialize white player if needed
-        let mut white_profile = USER_PROFILES.may_load(deps.storage, white_addr.clone())?
+        let initial_time = 172_800u64;
+
+        let (wager_funded_white, wager_funded_black) = if let Some(amount) = wager_amount {
+            if amount > Uint128::zero() {
+                let sent = info
+                    .funds
+                    .iter()
+                    .find(|c| c.denom == "uxion")
+                    .map(|c| c.amount)
+                    .unwrap_or(Uint128::zero());
+                if sent < amount {
+                    return Err(ContractError::InsufficientFunds {
+                        required: amount.to_string(),
+                        sent: sent.to_string(),
+                    });
+                }
+                (true, false)
+            } else {
+                (false, false)
+            }
+        } else {
+            (false, false)
+        };
+
+        let (status, black_addr) = match &opponent {
+            Some(opp) => ("active".to_string(), Some(opp.clone())),
+            None => ("waiting".to_string(), None),
+        };
+
+        let mut white_profile = USER_PROFILES
+            .may_load(deps.storage, white_addr.clone())?
             .unwrap_or_else(|| UserProfile {
                 username: white_addr.to_string(),
                 elo: 1200,
@@ -274,41 +346,43 @@ pub mod execute {
                 losses: 0,
                 current_games: Vec::new(),
                 created_at: env.block.height,
+                verified: false,
+                verified_platform: None,
+                verified_at: None,
             });
-        
-        // Initialize black player if needed
-        let mut black_profile = USER_PROFILES.may_load(deps.storage, black_addr.clone())?
-            .unwrap_or_else(|| UserProfile {
-                username: black_addr.to_string(),
-                elo: 1200,
-                games_played: 0,
-                wins: 0,
-                draws: 0,
-                losses: 0,
-                current_games: Vec::new(),
-                created_at: env.block.height,
-            });
-        
-        // Add game to both players' current games
-        white_profile.current_games.push(game_id.clone());
-        black_profile.current_games.push(game_id.clone());
-        
-        // Save updated profiles
-        USER_PROFILES.save(deps.storage, white_addr.clone(), &white_profile)?;
-        USER_PROFILES.save(deps.storage, black_addr.clone(), &black_profile)?;
-        USER_ADDRESSES.save(deps.storage, white_addr.clone(), &true)?;
-        USER_ADDRESSES.save(deps.storage, black_addr.clone(), &true)?;
 
-        // Time control: ~2 days total per player (172,800 blocks at 1 block/second)
-        let initial_time = 172_800u64;
-        
+        white_profile.current_games.push(game_id.clone());
+        USER_PROFILES.save(deps.storage, white_addr.clone(), &white_profile)?;
+        USER_ADDRESSES.save(deps.storage, white_addr.clone(), &true)?;
+
+        if let Some(ref black) = black_addr {
+            let mut black_profile = USER_PROFILES
+                .may_load(deps.storage, black.clone())?
+                .unwrap_or_else(|| UserProfile {
+                    username: black.to_string(),
+                    elo: 1200,
+                    games_played: 0,
+                    wins: 0,
+                    draws: 0,
+                    losses: 0,
+                    current_games: Vec::new(),
+                    created_at: env.block.height,
+                    verified: false,
+                    verified_platform: None,
+                    verified_at: None,
+                });
+            black_profile.current_games.push(game_id.clone());
+            USER_PROFILES.save(deps.storage, black.clone(), &black_profile)?;
+            USER_ADDRESSES.save(deps.storage, black.clone(), &true)?;
+        }
+
         let game = ChessGame {
             id: game_id.clone(),
-            white: info.sender.clone(),
-            black: opponent.clone(),
+            white: white_addr.clone(),
+            black: black_addr.clone(),
             moves: String::new(),
             current_fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string(),
-            status: "active".to_string(),
+            status,
             current_turn: "white".to_string(),
             last_move_block: env.block.height,
             white_time_remaining: initial_time,
@@ -318,6 +392,12 @@ pub mod execute {
             time_control,
             move_count: 0,
             draw_proposed_by: None,
+            wager_amount,
+            wager_denom: "uxion".to_string(),
+            wager_funded_white,
+            wager_funded_black,
+            spectator_wagers_enabled: allow_spectator_wagers.unwrap_or(false),
+            invite_code,
         };
 
         GAMES.save(deps.storage, game_id.clone(), &game)?;
@@ -326,8 +406,87 @@ pub mod execute {
         Ok(Response::new()
             .add_attribute("action", "create_game")
             .add_attribute("game_id", game_id)
-            .add_attribute("white", info.sender)
-            .add_attribute("black", opponent))
+            .add_attribute("white", white_addr)
+            .add_attribute(
+                "black",
+                black_addr
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "open".to_string()),
+            ))
+    }
+
+    pub fn join_game(
+        deps: DepsMut,
+        env: Env,
+        info: MessageInfo,
+        game_id: String,
+        invite_code: Option<String>,
+    ) -> Result<Response, ContractError> {
+        let mut game = GAMES.load(deps.storage, game_id.clone())?;
+
+        if game.status != "waiting" {
+            return Err(ContractError::GameNotWaiting {});
+        }
+
+        if game.white == info.sender {
+            return Err(ContractError::CannotJoinOwnGame {});
+        }
+
+        if let Some(ref code) = game.invite_code {
+            match invite_code {
+                Some(ref provided) if provided == code => {}
+                _ => return Err(ContractError::InvalidInviteCode {}),
+            }
+        }
+
+        if let Some(wager) = game.wager_amount {
+            if wager > Uint128::zero() {
+                let sent = info
+                    .funds
+                    .iter()
+                    .find(|c| c.denom == game.wager_denom)
+                    .map(|c| c.amount)
+                    .unwrap_or(Uint128::zero());
+                if sent < wager {
+                    return Err(ContractError::InsufficientFunds {
+                        required: wager.to_string(),
+                        sent: sent.to_string(),
+                    });
+                }
+                game.wager_funded_black = true;
+            }
+        }
+
+        let joiner = info.sender.clone();
+
+        let mut joiner_profile = USER_PROFILES
+            .may_load(deps.storage, joiner.clone())?
+            .unwrap_or_else(|| UserProfile {
+                username: joiner.to_string(),
+                elo: 1200,
+                games_played: 0,
+                wins: 0,
+                draws: 0,
+                losses: 0,
+                current_games: Vec::new(),
+                created_at: env.block.height,
+                verified: false,
+                verified_platform: None,
+                verified_at: None,
+            });
+        joiner_profile.current_games.push(game_id.clone());
+        USER_PROFILES.save(deps.storage, joiner.clone(), &joiner_profile)?;
+        USER_ADDRESSES.save(deps.storage, joiner.clone(), &true)?;
+
+        game.black = Some(joiner.clone());
+        game.status = "active".to_string();
+
+        GAMES.save(deps.storage, game_id.clone(), &game)?;
+
+        Ok(Response::new()
+            .add_attribute("action", "join_game")
+            .add_attribute("game_id", game_id)
+            .add_attribute("black", joiner))
     }
 
     pub fn make_move(
@@ -341,130 +500,110 @@ pub mod execute {
     ) -> Result<Response, ContractError> {
         let mut game = GAMES.load(deps.storage, game_id.clone())?;
 
-        // Check if it's the player's turn
         let is_white = game.white == info.sender;
-        let is_black = game.black == info.sender;
-        
+        let is_black = game
+            .black
+            .as_ref()
+            .map(|b| b == &info.sender)
+            .unwrap_or(false);
+
         if !is_white && !is_black {
             return Err(ContractError::NotPlayerInGame {});
         }
 
-        if (is_white && game.current_turn != "white") || (is_black && game.current_turn != "black") {
+        if (is_white && game.current_turn != "white")
+            || (is_black && game.current_turn != "black")
+        {
             return Err(ContractError::NotYourTurn {});
         }
 
-        // Time control logic with increments
-        // Only enforce time after both players have made their first move (move_count >= 2)
         if game.move_count >= 2 {
-            // Calculate time used since last move
             let time_used = env.block.height.saturating_sub(game.last_move_block);
-            
-            // Check if current player has enough time
             let current_time_remaining = if is_white {
                 game.white_time_remaining
             } else {
                 game.black_time_remaining
             };
-            
+
             if time_used >= current_time_remaining {
-                // Player has run out of time - they lose
-                let white_won = !is_white;  // Opponent wins
-                let black_won = !is_black;  // Opponent wins
+                let white_won = !is_white;
+                let black_won = !is_black;
                 game.status = if is_white { "black_won" } else { "white_won" }.to_string();
-                
-                // Update ELO ratings for timeout loss
                 update_profiles_after_game(&mut deps, &game, white_won, black_won, false)?;
-                
                 GAMES.save(deps.storage, game_id.clone(), &game)?;
-                
-                return Err(ContractError::IllegalMove { 
-                    error: "Time expired - you have lost the game".to_string() 
+                return Err(ContractError::IllegalMove {
+                    error: "Time expired - you have lost the game".to_string(),
                 });
             }
-            
-            // Deduct time used from current player's clock
+
             if is_white {
-                game.white_time_remaining = game.white_time_remaining.saturating_sub(time_used);
+                game.white_time_remaining =
+                    game.white_time_remaining.saturating_sub(time_used);
             } else {
-                game.black_time_remaining = game.black_time_remaining.saturating_sub(time_used);
+                game.black_time_remaining =
+                    game.black_time_remaining.saturating_sub(time_used);
             }
         }
 
-        // Validate the move using existing chess logic
-        let move_validation = query::validate_move(game.current_fen.clone(), from.clone(), to.clone(), promotion.clone())?;
-        
+        let move_validation = query::validate_move(
+            game.current_fen.clone(),
+            from.clone(),
+            to.clone(),
+            promotion.clone(),
+        )?;
+
         if !move_validation.is_valid {
-            return Err(ContractError::IllegalMove { 
-                error: move_validation.error.unwrap_or("Unknown error".to_string()) 
+            return Err(ContractError::IllegalMove {
+                error: move_validation.error.unwrap_or("Unknown error".to_string()),
             });
         }
 
-        // Update game state
         let move_string = format!("{}{}{}", from, to, promotion.unwrap_or_default());
         game.moves = if game.moves.is_empty() {
             move_string
         } else {
             format!("{},{}", game.moves, move_string)
         };
-        
+
         if let Some(new_fen) = move_validation.resulting_fen {
             game.current_fen = new_fen.clone();
-            
-            // Check for checkmate/stalemate/draw after the move
             let position_check = query::verify_position_internal(new_fen)?;
             match position_check.status {
                 GameStatus::Checkmate => {
-                    // The current player (who just moved) wins by checkmate
                     let white_won = game.current_turn == "white";
                     let black_won = game.current_turn == "black";
                     game.status = if white_won { "white_won" } else { "black_won" }.to_string();
-                    
-                    // Update ELO ratings
                     update_profiles_after_game(&mut deps, &game, white_won, black_won, false)?;
-                },
-                GameStatus::Stalemate => {
-                    game.status = "draw".to_string();
-                    
-                    // Update ELO ratings for draw
-                    update_profiles_after_game(&mut deps, &game, false, false, true)?;
-                },
-                GameStatus::Draw => {
-                    game.status = "draw".to_string();
-                    
-                    // Update ELO ratings for draw
-                    update_profiles_after_game(&mut deps, &game, false, false, true)?;
-                },
-                GameStatus::Active => {
-                    // Game continues
                 }
+                GameStatus::Stalemate | GameStatus::Draw => {
+                    game.status = "draw".to_string();
+                    update_profiles_after_game(&mut deps, &game, false, false, true)?;
+                }
+                GameStatus::Active => {}
             }
         }
-        
-        // Add time increment after successful move
-        // First 20 moves: 10 minutes (600 blocks) increment
-        // After 20 moves: 1 minute (60 blocks) increment
-        if game.move_count >= 2 {  // Only add increment after both players have made first move
-            let increment = if game.move_count <= 20 {
-                600u64  // 10 minutes for moves 1-20
-            } else {
-                60u64   // 1 minute for moves 21+
-            };
-            
-            // Add increment to the player who just moved
+
+        if game.move_count >= 2 {
+            let increment = if game.move_count <= 20 { 600u64 } else { 60u64 };
             if is_white {
-                game.white_time_remaining = game.white_time_remaining.saturating_add(increment);
+                game.white_time_remaining =
+                    game.white_time_remaining.saturating_add(increment);
             } else {
-                game.black_time_remaining = game.black_time_remaining.saturating_add(increment);
+                game.black_time_remaining =
+                    game.black_time_remaining.saturating_add(increment);
             }
         }
-        
-        // Update move count and last move block
+
         game.move_count += 1;
         game.last_move_block = env.block.height;
-        
-        // Only switch turns if game is still active
+
         if game.status == "active" {
-            game.current_turn = if game.current_turn == "white" { "black" } else { "white" }.to_string();
+            game.current_turn = if game.current_turn == "white" {
+                "black"
+            } else {
+                "white"
+            }
+            .to_string();
         }
 
         GAMES.save(deps.storage, game_id.clone(), &game)?;
@@ -484,29 +623,31 @@ pub mod execute {
     ) -> Result<Response, ContractError> {
         let mut game = GAMES.load(deps.storage, game_id.clone())?;
 
-        // Check if sender is a player in the game
-        if game.white != info.sender && game.black != info.sender {
+        let is_player = game.white == info.sender
+            || game
+                .black
+                .as_ref()
+                .map(|b| b == &info.sender)
+                .unwrap_or(false);
+        if !is_player {
             return Err(ContractError::NotPlayerInGame {});
         }
 
         let old_status = game.status.clone();
         game.status = status.clone();
-        
-        // Handle ELO updates for game-ending status changes
+
         if old_status == "active" {
             match status.as_str() {
                 "white_won" => {
                     update_profiles_after_game(&mut deps, &game, true, false, false)?;
-                },
+                }
                 "black_won" => {
                     update_profiles_after_game(&mut deps, &game, false, true, false)?;
-                },
+                }
                 "draw" => {
                     update_profiles_after_game(&mut deps, &game, false, false, true)?;
-                },
-                _ => {
-                    // Other status changes don't affect ELO
                 }
+                _ => {}
             }
         }
 
@@ -526,33 +667,42 @@ pub mod execute {
     ) -> Result<Response, ContractError> {
         let mut game = GAMES.load(deps.storage, game_id.clone())?;
 
-        // Check if sender is a player in the game
-        if game.white != info.sender && game.black != info.sender {
+        let is_player = game.white == info.sender
+            || game
+                .black
+                .as_ref()
+                .map(|b| b == &info.sender)
+                .unwrap_or(false);
+        if !is_player {
             return Err(ContractError::NotPlayerInGame {});
         }
 
-        // Can only resign active games
         if game.status != "active" {
             return Err(ContractError::GameNotActive {});
         }
 
-        // Determine winner based on who resigned
         let is_white = game.white == info.sender;
-        let white_won = !is_white;  // Opponent wins
-        let black_won = is_white;   // Opponent wins
-        
+        let white_won = !is_white;
+        let black_won = is_white;
+
         game.status = if is_white { "black_won" } else { "white_won" }.to_string();
-        
-        // Update ELO ratings for resignation
         update_profiles_after_game(&mut deps, &game, white_won, black_won, false)?;
 
         GAMES.save(deps.storage, game_id.clone(), &game)?;
+
+        let winner = if is_white {
+            game.black
+                .map(|a| a.to_string())
+                .unwrap_or_default()
+        } else {
+            game.white.to_string()
+        };
 
         Ok(Response::new()
             .add_attribute("action", "resign_game")
             .add_attribute("game_id", game_id)
             .add_attribute("resigned_player", info.sender)
-            .add_attribute("winner", if is_white { game.black.to_string() } else { game.white.to_string() }))
+            .add_attribute("winner", winner))
     }
 
     pub fn propose_draw(
@@ -562,17 +712,20 @@ pub mod execute {
     ) -> Result<Response, ContractError> {
         let mut game = GAMES.load(deps.storage, game_id.clone())?;
 
-        // Check if sender is a player in the game
-        if game.white != info.sender && game.black != info.sender {
+        let is_player = game.white == info.sender
+            || game
+                .black
+                .as_ref()
+                .map(|b| b == &info.sender)
+                .unwrap_or(false);
+        if !is_player {
             return Err(ContractError::NotPlayerInGame {});
         }
 
-        // Can only propose draw in active games
         if game.status != "active" {
             return Err(ContractError::GameNotActive {});
         }
 
-        // Check if draw already proposed by this player
         if let Some(ref proposer) = game.draw_proposed_by {
             if proposer == &info.sender.to_string() {
                 return Err(ContractError::DrawAlreadyProposed {});
@@ -596,33 +749,33 @@ pub mod execute {
     ) -> Result<Response, ContractError> {
         let mut game = GAMES.load(deps.storage, game_id.clone())?;
 
-        // Check if sender is a player in the game
-        if game.white != info.sender && game.black != info.sender {
+        let is_player = game.white == info.sender
+            || game
+                .black
+                .as_ref()
+                .map(|b| b == &info.sender)
+                .unwrap_or(false);
+        if !is_player {
             return Err(ContractError::NotPlayerInGame {});
         }
 
-        // Can only respond to draw proposals in active games
         if game.status != "active" {
             return Err(ContractError::GameNotActive {});
         }
 
-        // Check if there's a draw proposal
-        let draw_proposer = game.draw_proposed_by.clone()
+        let draw_proposer = game
+            .draw_proposed_by
+            .clone()
             .ok_or(ContractError::NoDrawProposal {})?;
 
-        // Can't respond to your own draw proposal
         if draw_proposer == info.sender.to_string() {
             return Err(ContractError::CannotRespondToOwnProposal {});
         }
 
         if accept {
-            // Accept draw - game ends in draw
             game.status = "draw".to_string();
             game.draw_proposed_by = None;
-            
-            // Update ELO ratings for draw
             update_profiles_after_game(&mut deps, &game, false, false, true)?;
-            
             GAMES.save(deps.storage, game_id.clone(), &game)?;
 
             Ok(Response::new()
@@ -631,7 +784,6 @@ pub mod execute {
                 .add_attribute("accepted_by", info.sender)
                 .add_attribute("result", "draw"))
         } else {
-            // Decline draw - clear proposal and continue game
             game.draw_proposed_by = None;
             GAMES.save(deps.storage, game_id.clone(), &game)?;
 
@@ -641,34 +793,273 @@ pub mod execute {
                 .add_attribute("declined_by", info.sender))
         }
     }
+
+    pub fn place_spectator_wager(
+        deps: DepsMut,
+        info: MessageInfo,
+        game_id: String,
+        prediction: String,
+    ) -> Result<Response, ContractError> {
+        let game = GAMES.load(deps.storage, game_id.clone())?;
+
+        if !game.spectator_wagers_enabled {
+            return Err(ContractError::SpectatorWagersDisabled {});
+        }
+
+        if game.status != "active" && game.status != "waiting" {
+            return Err(ContractError::GameNotActive {});
+        }
+
+        let denom = game.wager_denom.clone();
+        let sent = info
+            .funds
+            .iter()
+            .find(|c| c.denom == denom)
+            .map(|c| c.amount)
+            .unwrap_or(Uint128::zero());
+
+        if sent.is_zero() {
+            return Err(ContractError::InsufficientFunds {
+                required: "1".to_string(),
+                sent: "0".to_string(),
+            });
+        }
+
+        let bettor = info.sender.clone();
+        let wager = SpectatorWager {
+            game_id: game_id.clone(),
+            bettor: bettor.clone(),
+            prediction: prediction.clone(),
+            amount: sent,
+            denom,
+            claimed: false,
+        };
+
+        SPECTATOR_WAGERS.save(deps.storage, (game_id.clone(), bettor.clone()), &wager)?;
+
+        Ok(Response::new()
+            .add_attribute("action", "place_spectator_wager")
+            .add_attribute("game_id", game_id)
+            .add_attribute("bettor", bettor)
+            .add_attribute("prediction", prediction)
+            .add_attribute("amount", sent))
+    }
+
+    pub fn claim_winnings(
+        deps: DepsMut,
+        info: MessageInfo,
+        game_id: String,
+    ) -> Result<Response, ContractError> {
+        let game = GAMES.load(deps.storage, game_id.clone())?;
+
+        let is_finished = matches!(
+            game.status.as_str(),
+            "white_won" | "black_won" | "draw" | "stalemate"
+        );
+        if !is_finished {
+            return Err(ContractError::GameNotFinished {});
+        }
+
+        let claimant = info.sender.clone();
+        let is_white = game.white == claimant;
+        let is_black = game
+            .black
+            .as_ref()
+            .map(|b| b == &claimant)
+            .unwrap_or(false);
+
+        let mut messages: Vec<cosmwasm_std::CosmosMsg> = Vec::new();
+        let mut claimed_anything = false;
+
+        // Player wager claims
+        if (is_white || is_black)
+            && game
+                .wager_amount
+                .map(|a| a > Uint128::zero())
+                .unwrap_or(false)
+            && game.wager_funded_white
+            && game.wager_funded_black
+        {
+            let should_pay = matches!(
+                (game.status.as_str(), is_white, is_black),
+                ("white_won", true, _) | ("black_won", _, true) | ("draw", _, _)
+            );
+
+            if should_pay {
+                let payout = if game.status == "draw" {
+                    game.wager_amount.unwrap() // each player gets their stake back
+                } else {
+                    game.wager_amount.unwrap() * Uint128::new(2) // winner takes all
+                };
+
+                messages.push(cosmwasm_std::CosmosMsg::Bank(BankMsg::Send {
+                    to_address: claimant.to_string(),
+                    amount: vec![Coin {
+                        denom: game.wager_denom.clone(),
+                        amount: payout,
+                    }],
+                }));
+                claimed_anything = true;
+            }
+        }
+
+        // Spectator wager claims
+        if let Ok(mut spec_wager) =
+            SPECTATOR_WAGERS.load(deps.storage, (game_id.clone(), claimant.clone()))
+        {
+            if spec_wager.claimed {
+                return Err(ContractError::AlreadyClaimed {});
+            }
+
+            let won = match game.status.as_str() {
+                "white_won" => spec_wager.prediction == "white",
+                "black_won" => spec_wager.prediction == "black",
+                "draw" | "stalemate" => spec_wager.prediction == "draw",
+                _ => false,
+            };
+
+            if won {
+                messages.push(cosmwasm_std::CosmosMsg::Bank(BankMsg::Send {
+                    to_address: claimant.to_string(),
+                    amount: vec![Coin {
+                        denom: spec_wager.denom.clone(),
+                        amount: spec_wager.amount * Uint128::new(2),
+                    }],
+                }));
+                spec_wager.claimed = true;
+                SPECTATOR_WAGERS.save(
+                    deps.storage,
+                    (game_id.clone(), claimant.clone()),
+                    &spec_wager,
+                )?;
+                claimed_anything = true;
+            }
+        }
+
+        if !claimed_anything {
+            return Err(ContractError::NoWinningsToClaim {});
+        }
+
+        Ok(Response::new()
+            .add_messages(messages)
+            .add_attribute("action", "claim_winnings")
+            .add_attribute("game_id", game_id)
+            .add_attribute("claimant", claimant))
+    }
+
+    pub fn cancel_game(
+        deps: DepsMut,
+        info: MessageInfo,
+        game_id: String,
+    ) -> Result<Response, ContractError> {
+        let mut game = GAMES.load(deps.storage, game_id.clone())?;
+
+        if game.white != info.sender {
+            return Err(ContractError::NotGameCreator {});
+        }
+
+        if game.status != "waiting" {
+            return Err(ContractError::GameNotWaiting {});
+        }
+
+        game.status = "cancelled".to_string();
+        GAMES.save(deps.storage, game_id.clone(), &game)?;
+
+        let mut messages: Vec<cosmwasm_std::CosmosMsg> = Vec::new();
+
+        if game.wager_funded_white {
+            if let Some(amount) = game.wager_amount {
+                if amount > Uint128::zero() {
+                    messages.push(cosmwasm_std::CosmosMsg::Bank(BankMsg::Send {
+                        to_address: info.sender.to_string(),
+                        amount: vec![Coin {
+                            denom: game.wager_denom,
+                            amount,
+                        }],
+                    }));
+                }
+            }
+        }
+
+        Ok(Response::new()
+            .add_messages(messages)
+            .add_attribute("action", "cancel_game")
+            .add_attribute("game_id", game_id)
+            .add_attribute("cancelled_by", info.sender))
+    }
+
+    pub fn admin_set_elo(
+        deps: DepsMut,
+        address: cosmwasm_std::Addr,
+        elo: u32,
+    ) -> Result<Response, ContractError> {
+        let mut profile = USER_PROFILES
+            .may_load(deps.storage, address.clone())?
+            .unwrap_or_default();
+        profile.elo = elo;
+        USER_PROFILES.save(deps.storage, address.clone(), &profile)?;
+        USER_ADDRESSES.save(deps.storage, address.clone(), &true)?;
+
+        Ok(Response::new()
+            .add_attribute("action", "admin_set_elo")
+            .add_attribute("address", address)
+            .add_attribute("elo", elo.to_string()))
+    }
+
+    pub fn admin_set_stats(
+        deps: DepsMut,
+        address: cosmwasm_std::Addr,
+        wins: u32,
+        draws: u32,
+        losses: u32,
+        games_played: u32,
+    ) -> Result<Response, ContractError> {
+        let mut profile = USER_PROFILES
+            .may_load(deps.storage, address.clone())?
+            .unwrap_or_default();
+        profile.wins = wins;
+        profile.draws = draws;
+        profile.losses = losses;
+        profile.games_played = games_played;
+        USER_PROFILES.save(deps.storage, address.clone(), &profile)?;
+        USER_ADDRESSES.save(deps.storage, address.clone(), &true)?;
+
+        Ok(Response::new()
+            .add_attribute("action", "admin_set_stats")
+            .add_attribute("address", address))
+    }
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
-        QueryMsg::VerifyPosition { fen } => {
-            to_json_binary(&query::verify_position_internal(fen)?)
-        }
-        QueryMsg::ValidateMove { current_fen, move_from, move_to, promotion } => {
-            to_json_binary(&query::validate_move(current_fen, move_from, move_to, promotion)?)
-        }
-        QueryMsg::GetGame { game_id } => {
-            to_json_binary(&query::get_game(deps, game_id)?)
-        }
+        QueryMsg::VerifyPosition { fen } => to_json_binary(&query::verify_position_internal(fen)?),
+        QueryMsg::ValidateMove {
+            current_fen,
+            move_from,
+            move_to,
+            promotion,
+        } => to_json_binary(&query::validate_move(
+            current_fen,
+            move_from,
+            move_to,
+            promotion,
+        )?),
+        QueryMsg::GetGame { game_id } => to_json_binary(&query::get_game(deps, game_id)?),
         QueryMsg::GetPlayerGames { player } => {
             to_json_binary(&query::get_player_games(deps, player)?)
         }
-        QueryMsg::GetAllGameIds {} => {
-            to_json_binary(&query::get_all_game_ids(deps)?)
-        }
+        QueryMsg::GetAllGameIds {} => to_json_binary(&query::get_all_game_ids(deps)?),
         QueryMsg::CheckTimeStatus { game_id } => {
             to_json_binary(&query::check_time_status(deps, env, game_id)?)
         }
         QueryMsg::GetUserProfile { address } => {
             to_json_binary(&query::get_user_profile(deps, address)?)
         }
-        QueryMsg::GetAllUsers {} => {
-            to_json_binary(&query::get_all_users(deps)?)
+        QueryMsg::GetAllUsers {} => to_json_binary(&query::get_all_users(deps)?),
+        QueryMsg::GetOpenGames {} => to_json_binary(&query::get_open_games(deps)?),
+        QueryMsg::GetSpectatorWagers { game_id } => {
+            to_json_binary(&query::get_spectator_wagers(deps, game_id)?)
         }
     }
 }
@@ -676,25 +1067,26 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
 pub mod query {
     use super::*;
     use cosmwasm_std::Addr;
+    use cosmwasm_std::Order;
     use shakmaty::san::SanPlus;
 
     pub fn verify_position_internal(fen: String) -> StdResult<VerificationResponse> {
-        // Parse FEN into chess position
-        let fen_parsed: Fen = fen.parse()
+        let fen_parsed: Fen = fen
+            .parse()
             .map_err(|_| cosmwasm_std::StdError::generic_err("Invalid FEN format"))?;
-        
-        let pos: Chess = fen_parsed.into_position(shakmaty::CastlingMode::Standard)
+
+        let pos: Chess = fen_parsed
+            .into_position(shakmaty::CastlingMode::Standard)
             .map_err(|_| cosmwasm_std::StdError::generic_err("Invalid chess position"))?;
 
-        // Check if king is in check
         let is_check = pos.checkers().any();
 
-        // Get all legal moves
-        let legal_moves: Vec<String> = pos.legal_moves().iter()
+        let legal_moves: Vec<String> = pos
+            .legal_moves()
+            .iter()
             .map(|m| SanPlus::from_move(pos.clone(), m).to_string())
             .collect();
 
-        // Determine game status
         let status = if legal_moves.is_empty() {
             if is_check {
                 GameStatus::Checkmate
@@ -720,40 +1112,42 @@ pub mod query {
         move_to: String,
         promotion: Option<String>,
     ) -> StdResult<MoveValidationResponse> {
-        // Parse current position
-        let fen_parsed: Fen = current_fen.parse()
+        let fen_parsed: Fen = current_fen
+            .parse()
             .map_err(|_| cosmwasm_std::StdError::generic_err("Invalid FEN format"))?;
-        
-        let mut pos: Chess = fen_parsed.into_position(shakmaty::CastlingMode::Standard)
+
+        let mut pos: Chess = fen_parsed
+            .into_position(shakmaty::CastlingMode::Standard)
             .map_err(|_| cosmwasm_std::StdError::generic_err("Invalid chess position"))?;
 
-        // Parse squares
-        let from_square = move_from.parse()
+        let from_square = move_from
+            .parse()
             .map_err(|_| cosmwasm_std::StdError::generic_err("Invalid from square"))?;
-        let to_square = move_to.parse()
+        let to_square = move_to
+            .parse()
             .map_err(|_| cosmwasm_std::StdError::generic_err("Invalid to square"))?;
 
-        // Parse promotion piece if provided
         let promotion_role = if let Some(promo) = promotion {
             match promo.to_lowercase().as_str() {
                 "q" => Some(Role::Queen),
                 "r" => Some(Role::Rook),
                 "b" => Some(Role::Bishop),
                 "n" => Some(Role::Knight),
-                _ => return Ok(MoveValidationResponse {
-                    is_valid: false,
-                    resulting_fen: None,
-                    error: Some("Invalid promotion piece".to_string()),
-                }),
+                _ => {
+                    return Ok(MoveValidationResponse {
+                        is_valid: false,
+                        resulting_fen: None,
+                        error: Some("Invalid promotion piece".to_string()),
+                    })
+                }
             }
         } else {
             None
         };
 
-        // Get the piece info from current position
         let piece = pos.board().piece_at(from_square);
         let capture_role = pos.board().piece_at(to_square).map(|p| p.role);
-        
+
         if piece.is_none() {
             return Ok(MoveValidationResponse {
                 is_valid: false,
@@ -762,7 +1156,6 @@ pub mod query {
             });
         }
 
-        // Create move
         let chess_move = Move::Normal {
             from: from_square,
             to: to_square,
@@ -771,12 +1164,10 @@ pub mod query {
             role: piece.unwrap().role,
         };
 
-        // Check if move is legal (follows all chess rules)
         if pos.is_legal(&chess_move) {
-            // Make the move and get resulting FEN
             pos.play_unchecked(&chess_move);
-            let resulting_fen = Fen::from_position(pos, shakmaty::EnPassantMode::Legal).to_string();
-
+            let resulting_fen =
+                Fen::from_position(pos, shakmaty::EnPassantMode::Legal).to_string();
             Ok(MoveValidationResponse {
                 is_valid: true,
                 resulting_fen: Some(resulting_fen),
@@ -796,16 +1187,17 @@ pub mod query {
         Ok(GameResponse { game })
     }
 
-    pub fn get_player_games(deps: Deps, player: cosmwasm_std::Addr) -> StdResult<GamesResponse> {
+    pub fn get_player_games(deps: Deps, player: Addr) -> StdResult<GamesResponse> {
         let all_game_ids: Vec<String> = GAME_IDS
-            .keys(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+            .keys(deps.storage, None, None, Order::Ascending)
             .collect::<StdResult<Vec<_>>>()?;
 
         let mut player_games = Vec::new();
-        
         for game_id in all_game_ids {
             if let Some(game) = GAMES.may_load(deps.storage, game_id)? {
-                if game.white == player || game.black == player {
+                let in_game = game.white == player
+                    || game.black.as_ref().map(|b| b == &player).unwrap_or(false);
+                if in_game {
                     player_games.push(game);
                 }
             }
@@ -816,38 +1208,33 @@ pub mod query {
 
     pub fn get_all_game_ids(deps: Deps) -> StdResult<GameIdsResponse> {
         let game_ids: Vec<String> = GAME_IDS
-            .keys(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+            .keys(deps.storage, None, None, Order::Ascending)
             .collect::<StdResult<Vec<_>>>()?;
-
         Ok(GameIdsResponse { game_ids })
     }
 
-    pub fn check_time_status(deps: Deps, env: Env, game_id: String) -> StdResult<TimeStatusResponse> {
+    pub fn check_time_status(
+        deps: Deps,
+        env: Env,
+        game_id: String,
+    ) -> StdResult<TimeStatusResponse> {
         let game = GAMES.load(deps.storage, game_id)?;
-        
-        // Calculate time elapsed since last move
         let time_since_last_move = env.block.height.saturating_sub(game.last_move_block);
-        
-        // Calculate actual time remaining for each player
+
         let (white_time_remaining, black_time_remaining) = if game.move_count >= 2 {
-            // Time is being tracked after both players' first moves
-            let current_player_is_white = game.current_turn == "white";
-            
-            if current_player_is_white {
-                // White's turn - deduct time used from their clock
-                let white_remaining = game.white_time_remaining.saturating_sub(time_since_last_move);
+            if game.current_turn == "white" {
+                let white_remaining =
+                    game.white_time_remaining.saturating_sub(time_since_last_move);
                 (white_remaining, game.black_time_remaining)
             } else {
-                // Black's turn - deduct time used from their clock
-                let black_remaining = game.black_time_remaining.saturating_sub(time_since_last_move);
+                let black_remaining =
+                    game.black_time_remaining.saturating_sub(time_since_last_move);
                 (game.white_time_remaining, black_remaining)
             }
         } else {
-            // Time not tracked yet - return full time
             (game.white_time_remaining, game.black_time_remaining)
         };
-        
-        // Check if current player has run out of time
+
         let time_expired = if game.move_count >= 2 {
             let current_time = if game.current_turn == "white" {
                 white_time_remaining
@@ -858,11 +1245,11 @@ pub mod query {
         } else {
             false
         };
-        
+
         Ok(TimeStatusResponse {
             white_time_remaining,
             black_time_remaining,
-            current_player: game.current_turn.clone(),
+            current_player: game.current_turn,
             time_expired,
             move_count: game.move_count,
             time_since_last_move,
@@ -876,10 +1263,56 @@ pub mod query {
 
     pub fn get_all_users(deps: Deps) -> StdResult<UsersResponse> {
         let users: Vec<Addr> = USER_ADDRESSES
-            .keys(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+            .keys(deps.storage, None, None, Order::Ascending)
             .collect::<StdResult<Vec<_>>>()?;
-
         Ok(UsersResponse { users })
     }
-}
 
+    pub fn get_open_games(deps: Deps) -> StdResult<OpenGamesResponse> {
+        let all_game_ids: Vec<String> = GAME_IDS
+            .keys(deps.storage, None, None, Order::Ascending)
+            .collect::<StdResult<Vec<_>>>()?;
+
+        let mut open_games = Vec::new();
+        for game_id in all_game_ids {
+            if let Some(game) = GAMES.may_load(deps.storage, game_id)? {
+                if game.status == "waiting" {
+                    open_games.push(game);
+                }
+            }
+        }
+
+        Ok(OpenGamesResponse { games: open_games })
+    }
+
+    pub fn get_spectator_wagers(
+        deps: Deps,
+        game_id: String,
+    ) -> StdResult<SpectatorWagersResponse> {
+        let prefix = SPECTATOR_WAGERS.prefix(game_id);
+        let wagers: Vec<SpectatorWager> = prefix
+            .range(deps.storage, None, None, Order::Ascending)
+            .map(|item| item.map(|(_, v)| v))
+            .collect::<StdResult<Vec<_>>>()?;
+
+        let mut total_white = Uint128::zero();
+        let mut total_black = Uint128::zero();
+        let mut total_draw = Uint128::zero();
+
+        for w in &wagers {
+            match w.prediction.as_str() {
+                "white" => total_white += w.amount,
+                "black" => total_black += w.amount,
+                "draw" => total_draw += w.amount,
+                _ => {}
+            }
+        }
+
+        Ok(SpectatorWagersResponse {
+            wagers,
+            total_white,
+            total_black,
+            total_draw,
+        })
+    }
+}

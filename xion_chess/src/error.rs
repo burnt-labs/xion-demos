@@ -38,4 +38,38 @@ pub enum ContractError {
 
     #[error("Cannot respond to your own draw proposal")]
     CannotRespondToOwnProposal {},
+
+    // Wager errors
+    #[error("Insufficient funds: required {required}, sent {sent}")]
+    InsufficientFunds { required: String, sent: String },
+
+    #[error("No wager required for this game")]
+    NoWagerRequired {},
+
+    #[error("Wager already funded")]
+    WagerAlreadyFunded {},
+
+    #[error("Spectator wagering is not enabled for this game")]
+    SpectatorWagersDisabled {},
+
+    #[error("Game is not finished yet")]
+    GameNotFinished {},
+
+    #[error("No winnings to claim")]
+    NoWinningsToClaim {},
+
+    #[error("Winnings already claimed")]
+    AlreadyClaimed {},
+
+    #[error("Only the game creator can cancel")]
+    NotGameCreator {},
+
+    #[error("Invalid invite code")]
+    InvalidInviteCode {},
+
+    #[error("Game is not waiting for a player")]
+    GameNotWaiting {},
+
+    #[error("Cannot join your own game")]
+    CannotJoinOwnGame {},
 }
