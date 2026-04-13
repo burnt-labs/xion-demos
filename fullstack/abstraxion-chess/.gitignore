@@ -1,0 +1,83 @@
+# Dependencies
+node_modules/
+*/node_modules/
+abstraxion_ui/node_modules/
+frontend/node_modules/
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# Next.js
+/.next/
+*//.next/
+abstraxion_ui/.next/
+frontend/.next/
+/out/
+
+# Production builds
+/build
+*/build/
+abstraxion_ui/build/
+frontend/build/
+
+# Testing
+/coverage
+*/coverage/
+
+# Environment files
+.env
+.env.local
+.env*.local
+*.env
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# CosmWasm / Rust artifacts
+target/
+*/target/
+xion_chess/target/
+Cargo.lock
+artifacts/
+*.wasm
+schema/
+
+# Contract deployment artifacts
+code_id.txt
+contract_address.txt
+xion_chess/code_id.txt
+xion_chess/contract_address.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Misc
+*.pem
+.vercel
+.cache/
