@@ -13,7 +13,7 @@ A fully on-chain chess game built on the Xion blockchain using CosmWasm smart co
 ## Quick Start
 
 ### Prerequisites
-- Node.js (v18+)
+- Node.js (v24+)
 - Docker
 - [Xion CLI](https://docs.burnt.com/xion/developers/getting-started/installation)
 - Setup of your own Treasury/faucet for feegrants of users, you can use: https://quickstart.dev.testnet.burnt.com/
