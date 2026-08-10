@@ -6,7 +6,7 @@ import {
   useAbstraxionSigningClient,
   useAbstraxionClient,
   type GranteeSignerClient,
-} from "@burnt-labs/abstraxion";
+} from "@burnt-labs/abstraxion-react";
 
 import { CHESS_CONTRACT_ADDRESS } from "@/config";
 const DEFAULT_DENOM = "uxion";
