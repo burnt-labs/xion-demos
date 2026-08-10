@@ -5,7 +5,7 @@ import {
   useAbstraxionSigningClient,
   useAbstraxionClient,
   type GranteeSignerClient,
-} from "@burnt-labs/abstraxion";
+} from "@burnt-labs/abstraxion-react";
 import type { ChessUser } from "../types/chess";
 
 import { CHESS_CONTRACT_ADDRESS } from "@/config";
@@ -58,7 +58,7 @@ export function useUserProfileUnified(): UseUserProfileReturn {
         "auto"
       );
 
-      if (result.transactionHash) {
+      if (result?.transactionHash) {
         // Refresh profile after initialization
         await new Promise(resolve => setTimeout(resolve, 2000));
         await refreshProfile();

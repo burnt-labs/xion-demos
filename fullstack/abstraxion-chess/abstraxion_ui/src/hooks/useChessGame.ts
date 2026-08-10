@@ -5,8 +5,8 @@ import {
   useAbstraxionAccount,
   useAbstraxionSigningClient,
   useAbstraxionClient,
-} from "@burnt-labs/abstraxion";
-import type { GranteeSignerClient } from "@burnt-labs/abstraxion";
+} from "@burnt-labs/abstraxion-react";
+import type { GranteeSignerClient } from "@burnt-labs/abstraxion-react";
 import type { ChessGame, ChessMove, TimeStatus } from "../types/chess";
 import { CHESS_CONTRACT_ADDRESS } from "@/config";
 
@@ -179,7 +179,7 @@ export function useChessGame(): UseChessGameReturn {
         "auto"
       );
 
-      if (result.transactionHash) {
+      if (result?.transactionHash) {
         setCurrentGame(newGame);
         // Refresh user's active games after creating a game
         const updatedGames = await fetchUserActiveGames();
@@ -259,7 +259,7 @@ export function useChessGame(): UseChessGameReturn {
         "auto"
       );
 
-      if (result.transactionHash) {
+      if (result?.transactionHash) {
         // Refresh the game state from the contract
         const refreshedGame = await fetchGame(gameId);
         if (refreshedGame) {
@@ -306,7 +306,7 @@ export function useChessGame(): UseChessGameReturn {
         "auto"
       );
 
-      if (result.transactionHash) {
+      if (result?.transactionHash) {
         const refreshedGame = await fetchGame(gameId);
         if (refreshedGame) setCurrentGame(refreshedGame);
         await new Promise(resolve => setTimeout(resolve, 2000));
@@ -340,7 +340,7 @@ export function useChessGame(): UseChessGameReturn {
         "auto"
       );
 
-      if (result.transactionHash) {
+      if (result?.transactionHash) {
         const refreshedGame = await fetchGame(gameId);
         if (refreshedGame) setCurrentGame(refreshedGame);
         await new Promise(resolve => setTimeout(resolve, 2000));
@@ -388,7 +388,7 @@ export function useChessGame(): UseChessGameReturn {
         "auto"
       );
 
-      if (result.transactionHash) {
+      if (result?.transactionHash) {
         const refreshedGame = await fetchGame(gameId);
         if (refreshedGame) setCurrentGame(refreshedGame);
         await new Promise(resolve => setTimeout(resolve, 2000));
@@ -427,7 +427,7 @@ export function useChessGame(): UseChessGameReturn {
         "auto"
       );
 
-      if (result.transactionHash) {
+      if (result?.transactionHash) {
         // Refresh the game state
         const refreshedGame = await fetchGame(gameId);
         if (refreshedGame) {
@@ -593,7 +593,7 @@ export function useChessGame(): UseChessGameReturn {
         "auto"
       );
 
-      if (result.transactionHash) {
+      if (result?.transactionHash) {
         // Refresh the game state to show draw proposal
         const refreshedGame = await fetchGame(gameId);
         if (refreshedGame) {
@@ -636,7 +636,7 @@ export function useChessGame(): UseChessGameReturn {
         "auto"
       );
 
-      if (result.transactionHash) {
+      if (result?.transactionHash) {
         // Refresh the game state
         const refreshedGame = await fetchGame(gameId);
         if (refreshedGame) {

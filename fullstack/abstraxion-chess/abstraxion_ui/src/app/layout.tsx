@@ -5,7 +5,7 @@ import "./globals.css";
 import {
   AbstraxionProvider,
   type AbstraxionConfig,
-} from "@burnt-labs/abstraxion";
+} from "@burnt-labs/abstraxion-react";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { CHAIN_ID, RPC_URL, REST_URL, TREASURY_ADDRESS, CHESS_CONTRACT_ADDRESS } from "@/config";
 

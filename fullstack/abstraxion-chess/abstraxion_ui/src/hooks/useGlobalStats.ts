@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { useAbstraxionClient } from "@burnt-labs/abstraxion";
+import { useAbstraxionClient } from "@burnt-labs/abstraxion-react";
 
 import { CHESS_CONTRACT_ADDRESS } from "@/config";
 

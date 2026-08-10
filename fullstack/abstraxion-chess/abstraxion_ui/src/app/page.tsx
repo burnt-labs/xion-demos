@@ -4,7 +4,7 @@ import {
   useAbstraxionAccount,
   useAbstraxionSigningClient,
   useAbstraxionClient,
-} from "@burnt-labs/abstraxion";
+} from "@burnt-labs/abstraxion-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";

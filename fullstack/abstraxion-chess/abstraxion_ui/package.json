@@ -9,7 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@burnt-labs/abstraxion": "^1.0.0-alpha.77",
+    "@burnt-labs/abstraxion-react": "^1.0.0-alpha.82",
     "@radix-ui/react-slot": "^1.2.4",
     "chess.js": "^1.4.0",
     "class-variance-authority": "^0.7.1",
